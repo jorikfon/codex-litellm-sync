@@ -6,7 +6,9 @@ Builds a [Codex CLI](https://github.com/openai/codex) model catalog from a LiteL
 Codex has no plugin hook for models. It takes a static catalog through `model_catalog_json` in
 `config.toml`, and it wants its own format (`{"models": [ModelInfo…]}` with reasoning levels,
 context window and the agent prompt), not OpenAI's `/v1/models`. This script reads LiteLLM's
-`GET /model_group/info` and writes that file.
+`GET /model_group/info` (limits, vision, reasoning levels), keeps only the models
+`GET /model/info` lists for your key — so a model the key may not call does not show up only to
+answer 403 — and writes that file. If `/model/info` fails or is empty, every group is kept.
 
 ## Use
 
@@ -40,6 +42,16 @@ env_key = "LITELLM_MMR_KEY"
   listed bundled model (from `codex debug models --bundled`; `codex` must be on `PATH`). A slug
   Codex already ships (e.g. `gpt-6-luna`) keeps its bundled entry as is.
 - Embedding/moderation groups are skipped; `mode: null` groups are kept.
+- Reasoning levels are exactly LiteLLM's `supported_reasoning_efforts`. A model gets none when
+  LiteLLM reports `supports_reasoning: false` or its deployments pin reasoning off
+  (`reasoning_effort: "none"`, `enable_thinking: false`, `thinking.type: "disabled"` in
+  `litellm_params`, as `/model/info` shows them; only these fields are read).
+- An empty level list does **not** stop Codex from sending an effort: for a non-OpenAI provider
+  it sends whatever the session or `model_reasoning_effort` in `config.toml` says, unchecked
+  against the model. A global `model_reasoning_effort` therefore reaches models without levels,
+  and a client effort can override a deployment's pinned `reasoning_effort: "none"` (seen on
+  DeepSeek, not on Qwen's `enable_thinking: false`). Prefer choosing the effort per model in
+  `/model`, or pin reasoning off on the LiteLLM side in a way the client cannot override.
 - The file is regenerated from scratch on each run — edit LiteLLM, not the file.
 - Codex sends `client_metadata` and a `reasoning` object on every request, whatever the catalog
   says; each LiteLLM deployment must accept or drop them (`additional_drop_params`).

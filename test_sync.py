@@ -1,6 +1,6 @@
 import unittest
 
-from codex_litellm_sync import build_catalog, with_catalog_key
+from codex_litellm_sync import build_catalog, key_models, with_catalog_key
 
 GROUPS = [
     {"model_group": "gpt-6-luna", "mode": "chat", "max_input_tokens": 922000.0,
@@ -30,6 +30,28 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(models["qwen"]["context_window"], 128000)
         self.assertEqual(models["qwen"]["priority"], 2)
         self.assertNotIn("default_reasoning_level", models["qwen"])
+
+    def test_key_scope_and_no_reasoning(self):
+        groups = GROUPS + [
+            {"model_group": "deepseek-no-reasoning", "mode": "chat", "supports_reasoning": True,
+             "supported_reasoning_efforts": ["none", "low", "high", "max"]},
+            {"model_group": "flagged-off", "mode": "chat", "supports_reasoning": False,
+             "supported_reasoning_efforts": ["low"]},
+        ]
+        allowed = key_models([
+            {"model_name": "glm-5.3", "litellm_params": {}},
+            {"model_name": "deepseek-no-reasoning", "litellm_params": {"reasoning_effort": "none"}},
+            {"model_name": "flagged-off"},
+            {"model_name": "glm-5.3", "litellm_params": {"reasoning_effort": "none"}},  # not all deployments
+        ])
+        models = {m["slug"]: m for m in build_catalog(groups, BUNDLED, allowed=allowed)["models"]}
+        self.assertEqual(sorted(models), ["deepseek-no-reasoning", "flagged-off", "glm-5.3"])
+        for slug in ("deepseek-no-reasoning", "flagged-off"):
+            self.assertEqual(models[slug]["supported_reasoning_levels"], [], slug)
+            self.assertNotIn("default_reasoning_level", models[slug])
+        self.assertEqual(len(models["glm-5.3"]["supported_reasoning_levels"]), 3)
+        # /model/info unavailable -> no filter, as before
+        self.assertIn("qwen", {m["slug"] for m in build_catalog(groups, BUNDLED)["models"]})
 
     def test_config_key(self):
         cfg = 'model = "x"\n\n[features]\nfoo = true\n'

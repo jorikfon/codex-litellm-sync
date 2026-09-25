@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build a Codex CLI model catalog from a LiteLLM proxy.
 
-Reads LiteLLM `GET /model_group/info` and writes a `model_catalog_json` file for Codex.
+Reads LiteLLM `GET /model_group/info` (limits, reasoning levels), narrows it to the models
+`GET /model/info` lists for the key, and writes a `model_catalog_json` file for Codex.
 Without --write it only prints what it would do.
 """
 import argparse
@@ -30,8 +31,46 @@ def bundled_models():
     return json.loads(out)["models"]
 
 
-def to_model(group, priority, default_context, template):
-    efforts = group.get("supported_reasoning_efforts") or []
+def reasoning_pinned_off(deployment):
+    """Reasoning switched off on the deployment itself. Only these litellm_params fields are read:
+    the rest of it references provider credentials and is never kept or printed."""
+    params = deployment.get("litellm_params") or {}
+    thinking = params.get("thinking")
+    return (params.get("reasoning_effort") == "none" or params.get("enable_thinking") is False
+            or (isinstance(thinking, dict) and thinking.get("type") == "disabled"))
+
+
+def key_models(deployments):
+    """Models the key may call -> True when reasoning is pinned off on every deployment."""
+    out = {}
+    for d in deployments:
+        name = d.get("model_name")
+        if name:
+            out[name] = out.get(name, True) and reasoning_pinned_off(d)
+    return out
+
+
+def fetch_key_models(base_url, key):
+    """`/model_group/info` also lists groups the key may not call (403 at request time);
+    `/model/info` is key-scoped. None when it fails or is empty: then nothing is filtered."""
+    req = urllib.request.Request(base_url.rstrip("/") + "/model/info",
+                                 headers={"Authorization": "Bearer " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            models = key_models(json.load(resp).get("data") or [])
+    except (OSError, ValueError) as exc:
+        print("model/info: {}; listing every model group, some may answer 403".format(exc), file=sys.stderr)
+        return None
+    if not models:
+        print("model/info: empty list; listing every model group", file=sys.stderr)
+        return None
+    return models
+
+
+def to_model(group, priority, default_context, template, no_reasoning=False):
+    # No levels for a model without reasoning: LiteLLM says so, or the deployment pins it off.
+    reasoning = group.get("supports_reasoning") is not False and not no_reasoning
+    efforts = (group.get("supported_reasoning_efforts") or []) if reasoning else []
     default = next((e for e in ("medium", "high") if e in efforts), efforts[0] if efforts else None)
     context = int(group.get("max_input_tokens") or default_context)
     model = {
@@ -64,17 +103,22 @@ def to_model(group, priority, default_context, template):
     return model
 
 
-def build_catalog(groups, bundled, default_context=128000):
-    """LiteLLM chat groups as Codex models; a slug Codex ships keeps its bundled entry."""
+def build_catalog(groups, bundled, default_context=128000, allowed=None):
+    """LiteLLM chat groups as Codex models; a slug Codex ships keeps its bundled entry.
+
+    allowed: result of key_models(); None means the key's list is unknown and nothing is filtered.
+    """
     known = {m["slug"]: m for m in bundled}
     template = next(m for m in bundled if m["visibility"] == "list")
-    chat = [g for g in groups if str(g.get("mode") or "").lower() not in SKIP_MODES]
+    chat = [g for g in groups if str(g.get("mode") or "").lower() not in SKIP_MODES
+            and (allowed is None or g["model_group"] in allowed)]
     models = []
     for i, g in enumerate(chat):
         if g["model_group"] in known:
             models.append(dict(known[g["model_group"]], priority=i, visibility="list"))
         else:
-            models.append(to_model(g, i, default_context, template))
+            models.append(to_model(g, i, default_context, template,
+                                   no_reasoning=bool(allowed and allowed.get(g["model_group"]))))
     return {"models": models}
 
 
@@ -106,7 +150,8 @@ def main():
     key = os.environ.get(args.key_env)
     if not key:
         sys.exit("${} is not set".format(args.key_env))
-    catalog = build_catalog(fetch_groups(args.url, key), bundled_models(), args.default_context)
+    catalog = build_catalog(fetch_groups(args.url, key), bundled_models(), args.default_context,
+                            fetch_key_models(args.url, key))
     new = [m["slug"] for m in catalog["models"]]
     old = []
     if args.out.exists():
