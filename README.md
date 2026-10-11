@@ -57,4 +57,23 @@ env_key = "LITELLM_MMR_KEY"
   says; each LiteLLM deployment must accept or drop them (`additional_drop_params`).
 - Check the result with `codex debug models`.
 
+## Troubleshooting
+
+**`SSL: CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`** — your Python's CA
+bundle is older than the proxy's certificate chain. Typical case: python.org Python 3.11 ships
+`certifi` without *ISRG Root YR*, the Let's Encrypt root issued since late 2025, while the system
+`curl` validates fine because it uses the macOS keychain. Fixes, any of:
+
+```sh
+/Applications/Python\ 3.11/Install\ Certificates.command   # python.org builds
+python3 -m pip install --upgrade certifi                   # then re-run the script above
+/opt/homebrew/bin/python3 codex_litellm_sync.py --write    # or just use a newer Python
+```
+
+**`model/info: empty list; listing every model group`** — the key calls `/v1/models` fine but
+`GET /model/info` answers `{"data": []}`, so the script cannot narrow the catalog to what the key
+may call and keeps every chat group (some may answer 403 at request time). This is a LiteLLM-side
+permission/routing question, not a script bug; ask the proxy admin why the key sees no entries in
+`/model/info`.
+
 Requirements: Codex with `model_catalog_json` (checked on 0.155.1 and 0.156.1), stdlib Python ≥ 3.9.
